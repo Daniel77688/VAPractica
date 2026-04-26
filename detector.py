@@ -9,7 +9,7 @@
 #
 # NOTA SOBRE CÓDIGO DE TERCEROS:
 # Para la implementación de ciertas utilidades algorítmicas clásicas en visión
-# por computador (como el cálculo IoU y NMS) se han adaptado ejemplos de 
+# por computador (como el cálculo IoU y NMS) se han adaptado ejemplos de
 # tutoriales públicos (específicamente de PyImageSearch). La procedencia exacta
 # se indica en los métodos correspondientes.
 # ============================================================================
@@ -57,11 +57,8 @@ class Detector:
 
 class DetectorBase(Detector):
     """
-    Detector básico de paneles informativos azules de autopista.
-
-    Pipeline híbrido que combina dos fuentes de candidatos:
-      A) Segmentación por color HSV + cierre morfológico + contornos.
-      B) MSER sobre imagen en escala de grises ecualizada.
+    A) Segmentación por color HSV + cierre morfológico + contornos.
+    B) MSER sobre imagen en escala de grises ecualizada.
 
     Cada candidato se evalúa con:
       1. Filtros de aspect ratio, tamaño y dimensión mínima.
@@ -69,14 +66,16 @@ class DetectorBase(Detector):
       3. Score F1 entre la máscara azul del candidato y una máscara ideal.
       4. Verificación de borde claro/blanco alrededor de la región azul.
       5. NMS para eliminar detecciones redundantes.
-
-    Solo utiliza técnicas clásicas de OpenCV (sin ML).
     """
 
     def __init__(self):
         super().__init__()
 
         # --- Parámetros del detector MSER ---
+        # 📎 Referencia parámetros MSER (indicada también en el enunciado):
+        #    https://stackoverflow.com/questions/17647500/exact-meaning-of-the-parameters-given-to-initialize-mser-in-opencv-2-4-x
+        # 📎 Ejemplo de uso oficial de MSER en OpenCV:
+        #    https://github.com/opencv/opencv/blob/master/samples/python/mser.py
         self.mser = cv2.MSER_create()
         self.mser.setDelta(5)
         self.mser.setMinArea(600)
@@ -92,6 +91,10 @@ class DetectorBase(Detector):
         self.mser_fog.setMinDiversity(0.2)
 
         # --- Rangos HSV para azul saturado ---
+        # 📎 Segmentación de color en espacio HSV con cv2.inRange:
+        #    https://docs.opencv.org/4.x/df/d9d/tutorial_py_colorspaces.html
+        # 📎 Cómo elegir los rangos HSV correctos para detección de color:
+        #    https://stackoverflow.com/questions/10948589/choosing-the-correct-upper-and-lower-hsv-boundaries-for-color-detection-with-cv
         self.hsv_lower = np.array([100, 130, 80])
         self.hsv_upper = np.array([130, 255, 255])
         # Rango más permisivo para azul desaturado (niebla/humo)
@@ -102,6 +105,8 @@ class DetectorBase(Detector):
         self.hsv_upper_dense_fog = np.array([140, 255, 255])
 
         # --- Kernel para cierre morfológico ---
+        # 📎 Operaciones morfológicas (erosión, dilatación, cierre) en OpenCV:
+        #    https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         self.morph_kernel_fog = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
@@ -141,8 +146,13 @@ class DetectorBase(Detector):
         self.bottom_roi_fraction = 0.86
         self.edge_score_min = 0.75
         self.containment_threshold = 0.65
+        self.cluster_center_dist_factor = 0.28
+        self.cluster_gap_factor = 0.40
+        self.cluster_min_axis_overlap = 0.12
 
         # --- Máscara ideal para correlación ---
+        # 📎 Concepto de template matching / correlación con máscara ideal:
+        #    https://docs.opencv.org/4.x/d4/dc6/tutorial_py_template_matching.html
         self.mask_h = 40
         self.mask_w = 80
         self.ideal_mask = self._build_ideal_mask()
@@ -160,7 +170,12 @@ class DetectorBase(Detector):
         return mask
 
     def _estimate_fog(self, hsv_image, gray_eq):
-        """Estima si la imagen presenta niebla/baja visibilidad."""
+        """
+        Estima si la imagen presenta niebla/baja visibilidad.
+        Heurística propia basada en la media del canal S (saturación) en HSV
+        y la densidad de bordes Canny: imágenes con niebla tienen baja saturación
+        y pocos bordes definidos.
+        """
         sat_mean = float(hsv_image[:, :, 1].mean())
         edges = cv2.Canny(gray_eq, 80, 160)
         edge_ratio = float(np.count_nonzero(edges) / edges.size)
@@ -169,7 +184,11 @@ class DetectorBase(Detector):
         return is_fog, is_dense
 
     def _get_blue_mask(self, roi_bgr, hsv_lower=None, hsv_upper=None):
-        """Máscara binaria de píxeles azules, normalizada a tamaño fijo."""
+        """
+        Máscara binaria de píxeles azules, normalizada a tamaño fijo.
+        📎 Conversión BGR→HSV y segmentación con inRange:
+           https://docs.opencv.org/4.x/df/d9d/tutorial_py_colorspaces.html
+        """
         hsv_lower = self.hsv_lower if hsv_lower is None else hsv_lower
         hsv_upper = self.hsv_upper if hsv_upper is None else hsv_upper
         roi = cv2.resize(roi_bgr, (self.mask_w, self.mask_h), interpolation=cv2.INTER_AREA)
@@ -187,7 +206,13 @@ class DetectorBase(Detector):
         return np.count_nonzero(mask) / total if total > 0 else 0.0
 
     def _compute_score(self, blue_mask):
-        """Score F1 entre la máscara azul del candidato y la ideal."""
+        """
+        Score F1 entre la máscara azul del candidato y la ideal.
+        Combina precisión (píxeles azules bien colocados) y recall
+        (cobertura del área esperada), siguiendo la métrica estándar F1.
+        📎 Concepto de template matching con correlación elemento a elemento:
+           https://docs.opencv.org/4.x/d4/dc6/tutorial_py_template_matching.html
+        """
         tp = np.sum(blue_mask * self.ideal_mask)
         recall = tp / (np.sum(self.ideal_mask) + 1e-6)
         precision = tp / (np.sum(blue_mask) + 1e-6)
@@ -228,9 +253,9 @@ class DetectorBase(Detector):
     def _compute_iou(self, boxA, boxB):
         """
         IoU entre dos bounding boxes.
-        Fuente/Inspiración: Algoritmo estándar de la literatura, adaptado
-        del tutorial de PyImageSearch (Adrian Rosebrock).
-        URL: https://pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/
+        📎 Fuente/Inspiración: Algoritmo estándar de la literatura, adaptado
+           del tutorial de PyImageSearch (Adrian Rosebrock).
+           https://pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/
         """
         xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
         xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
@@ -242,9 +267,9 @@ class DetectorBase(Detector):
     def _nms(self, detections):
         """
         Non-Maximum Suppression: ordena por score y suprime IoU > umbral.
-        Fuente: Algoritmo clásico de NMS adaptado de tutoriales públicos 
-        (Malisiewicz et al. a través de PyImageSearch).
-        URL: https://pyimagesearch.com/2015/02/16/faster-non-maximum-suppression-python/
+        📎 Fuente: Algoritmo clásico de NMS adaptado de tutoriales públicos
+           (Malisiewicz et al. a través de PyImageSearch).
+           https://pyimagesearch.com/2015/02/16/faster-non-maximum-suppression-python/
         """
         if not detections:
             return []
@@ -263,7 +288,7 @@ class DetectorBase(Detector):
     def _suppress_contained(self, detections):
         """
         Suprime detecciones contenidas dentro de otra de mayor score.
-        Solo si el contenedor tiene área < 3× la del contenido (evita
+        Solo si el contenedor tiene área < 8× la del contenido (evita
         suprimir paneles reales dentro de un box multi-panel).
         """
         if len(detections) <= 1:
@@ -277,7 +302,7 @@ class DetectorBase(Detector):
             is_contained = False
             for kd in kept:
                 area_kd = (kd[2] - kd[0]) * (kd[3] - kd[1])
-                if area_kd > 3.0 * area_det:
+                if area_kd > 8.0 * area_det:
                     continue
                 xA, yA = max(det[0], kd[0]), max(det[1], kd[1])
                 xB, yB = min(det[2], kd[2]), min(det[3], kd[3])
@@ -289,6 +314,90 @@ class DetectorBase(Detector):
                 kept.append(det)
         return kept
 
+    def _axis_overlap_ratio(self, a1, a2, b1, b2):
+        """Solape normalizado entre dos intervalos 1D."""
+        overlap = max(0, min(a2, b2) - max(a1, b1))
+        denom = max(1e-6, min(a2 - a1, b2 - b1))
+        return overlap / denom
+
+    def _should_cluster_pair(self, d1, d2):
+        """
+        Decide si dos detecciones cercanas deben agruparse en una envolvente.
+        Criterio: centros próximos o gap reducido, con cierto alineamiento.
+        """
+        x1a, y1a, x2a, y2a = d1[:4]
+        x1b, y1b, x2b, y2b = d2[:4]
+        wa, ha = x2a - x1a, y2a - y1a
+        wb, hb = x2b - x1b, y2b - y1b
+        if wa <= 0 or ha <= 0 or wb <= 0 or hb <= 0:
+            return False
+
+        cxa, cya = (x1a + x2a) / 2.0, (y1a + y2a) / 2.0
+        cxb, cyb = (x1b + x2b) / 2.0, (y1b + y2b) / 2.0
+        dx = abs(cxa - cxb)
+        dy = abs(cya - cyb)
+        ref_w = max(wa, wb)
+        ref_h = max(ha, hb)
+        x_overlap = self._axis_overlap_ratio(x1a, x2a, x1b, x2b)
+        y_overlap = self._axis_overlap_ratio(y1a, y2a, y1b, y2b)
+
+        close_centers = (
+            dx <= self.cluster_center_dist_factor * ref_w and
+            dy <= self.cluster_center_dist_factor * ref_h
+        )
+
+        # Gap entre cajas en ejes horizontal/vertical.
+        h_gap = max(0, max(x1a, x1b) - min(x2a, x2b))
+        v_gap = max(0, max(y1a, y1b) - min(y2a, y2b))
+        close_gap = (
+            (h_gap <= self.cluster_gap_factor * ref_w and
+             y_overlap >= self.cluster_min_axis_overlap) or
+            (v_gap <= self.cluster_gap_factor * ref_h and
+             x_overlap >= self.cluster_min_axis_overlap)
+        )
+        return close_centers or close_gap
+
+    def _cluster_by_proximity(self, detections):
+        """
+        Agrupa detecciones próximas y las fusiona en un rectángulo envolvente.
+        """
+        n = len(detections)
+        if n <= 1:
+            return detections
+
+        visited = [False] * n
+        clusters = []
+        for i in range(n):
+            if visited[i]:
+                continue
+            stack = [i]
+            visited[i] = True
+            comp = [i]
+            while stack:
+                u = stack.pop()
+                for v in range(n):
+                    if visited[v]:
+                        continue
+                    if self._should_cluster_pair(detections[u], detections[v]):
+                        visited[v] = True
+                        stack.append(v)
+                        comp.append(v)
+            clusters.append(comp)
+
+        merged = []
+        for comp in clusters:
+            if len(comp) == 1:
+                merged.append(detections[comp[0]])
+                continue
+            boxes = [detections[idx] for idx in comp]
+            x1 = min(b[0] for b in boxes)
+            y1 = min(b[1] for b in boxes)
+            x2 = max(b[2] for b in boxes)
+            y2 = max(b[3] for b in boxes)
+            score = max(b[4] for b in boxes)
+            merged.append((x1, y1, x2, y2, score))
+        return merged
+
     def _filter_by_position(self, detections, h_img, w_img):
         """Filtra detecciones en posiciones inverosímiles (asfalto, esquinas)."""
         margin = 5
@@ -297,6 +406,10 @@ class DetectorBase(Detector):
             x1, y1, x2, y2, score = det
             # Centro en zona inferior (carretera/capó)
             if (y1 + y2) / 2 > h_img * self.bottom_roi_fraction:
+                continue
+            # Falsos positivos típicos: franjas bajas azules (capó/carrocería).
+            h_box = y2 - y1
+            if y1 > h_img * 0.50 and h_box < h_img * 0.08 and score < 0.82:
                 continue
             # Toca ≥2 bordes de imagen (esquinas/bandas)
             touches = sum([x1 <= margin, x2 >= w_img - margin,
@@ -316,6 +429,8 @@ class DetectorBase(Detector):
 
     def _postprocess(self, detections, h_img, w_img):
         """Aplica todos los filtros de post-procesamiento."""
+        detections = self._cluster_by_proximity(detections)
+        detections = self._nms(detections)
         detections = self._suppress_contained(detections)
         detections = self._filter_by_position(detections, h_img, w_img)
         detections = self._filter_edge_low_score(detections, h_img, w_img)
@@ -327,7 +442,11 @@ class DetectorBase(Detector):
 
     def _get_color_candidates(self, hsv_image, hsv_lower, hsv_upper,
                               use_small_kernel=False):
-        """Candidatos por segmentación de color HSV + cierre + contornos."""
+        """
+        Candidatos por segmentación de color HSV + cierre + contornos.
+        📎 Operación de cierre morfológico para unir regiones fragmentadas:
+           https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
+        """
         mask = cv2.inRange(hsv_image, hsv_lower, hsv_upper)
         kernel = self.morph_kernel_fog if use_small_kernel else self.morph_kernel
         closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
@@ -336,7 +455,13 @@ class DetectorBase(Detector):
                 if cv2.boundingRect(c)[2] > 0 and cv2.boundingRect(c)[3] > 0]
 
     def _get_mser_candidates(self, gray_eq, use_fog_mser=False):
-        """Candidatos por MSER sobre imagen ecualizada."""
+        """
+        Candidatos por MSER sobre imagen ecualizada.
+        📎 Parámetros MSER en OpenCV:
+           https://stackoverflow.com/questions/17647500/exact-meaning-of-the-parameters-given-to-initialize-mser-in-opencv-2-4-x
+        📎 Ejemplo oficial de uso:
+           https://github.com/opencv/opencv/blob/master/samples/python/mser.py
+        """
         engine = self.mser_fog if use_fog_mser else self.mser
         regions, _ = engine.detectRegions(gray_eq)
         return [cv2.boundingRect(r) for r in regions
@@ -440,8 +565,11 @@ class DetectorBase(Detector):
         """
         Mejora contraste local con CLAHE en LAB para recuperar
         paneles azules en niebla muy densa.
-        Fuente: Técnica estándar recomendada en la documentación oficial de OpenCV.
-        URL: https://docs.opencv.org/4.x/d5/daf/tutorial_py_histogram_equalization.html
+        📎 Fuente: Técnica estándar recomendada en la documentación oficial de OpenCV
+           (equalización de histograma y CLAHE):
+           https://docs.opencv.org/4.x/d5/daf/tutorial_py_histogram_equalization.html
+        📎 Aumento de contraste en imágenes con OpenCV en Python:
+           https://stackoverflow.com/questions/39308030/how-do-i-increase-the-contrast-of-an-image-in-python-opencv
         Returns (enhanced_bgr, enhanced_hsv, enhanced_gray_eq).
         """
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -546,73 +674,101 @@ class DetectorBase(Detector):
         """
         return self.detect(image), []
 
+
 class DetectorHough(DetectorBase):
     """
     Detector Alternativo para el Punto 4 (Transformada de Hough).
-    
+
     Utiliza cv2.HoughLinesP para extraer bordes rectos (segmentos de línea).
-    A partir de estos segmentos, reconstruye un esqueleto de líneas que se intersectan 
-    (posibles marcos rectangulares de paneles) de manera muy eficiente (O(N)), y 
+    A partir de estos segmentos, reconstruye un esqueleto de líneas que se intersectan
+    (posibles marcos rectangulares de paneles) de manera muy eficiente (O(N)), y
     busca contornos sobre dicha estructura para determinar los candidatos a panel.
+
+    El score se calcula mediante F1 entre la máscara azul del candidato y la máscara
+    ideal, igual que en DetectorBase (coherencia entre detectores).
+
+    📎 Transformada de Hough Probabilística en OpenCV:
+       https://docs.opencv.org/4.x/d6/d10/tutorial_py_houghlines.html
+    📎 Uso de HoughLinesP para detectar segmentos rectos:
+       https://stackoverflow.com/questions/45322630/how-to-detect-lines-in-opencv
     """
 
     def __init__(self):
         super().__init__()
 
     def detect(self, image: np.ndarray) -> list:
+        h_img, w_img = image.shape[:2]
+
         # 1. Convertir a escala de grises y suavizar para reducir ruido
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        
+
         # 2. Detector de bordes Canny
         edges = cv2.Canny(blur, 50, 150)
-        
+
         # 3. Transformada de Hough Probabilística para extraer segmentos rectos
-        lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=40, 
+        # 📎 https://docs.opencv.org/4.x/d6/d10/tutorial_py_houghlines.html
+        lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=40,
                                 minLineLength=25, maxLineGap=15)
-        
+
         candidates = []
-        h_img, w_img = image.shape[:2]
-        
+
         if lines is not None:
-            # 4. Dibujar los segmentos potentes de Hough en una máscara
-            # Esto agrupa líneas que se intersectan formando geometrías (esquinas)
+            # 4. Dibujar los segmentos de Hough en una máscara
             hough_mask = np.zeros_like(edges)
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                # Dibujamos las líneas gruesas para forzar el cierre en las esquinas
                 cv2.line(hough_mask, (x1, y1), (x2, y2), 255, 3)
-                
-            # 5. Extraer los bloques/formas resultantes de las intersecciones de Hough
-            contours, _ = cv2.findContours(hough_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # 5. Extraer contornos de las intersecciones de Hough
+            contours, _ = cv2.findContours(hough_mask, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
             hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-            
+
             for c in contours:
                 x, y, w, h = cv2.boundingRect(c)
                 aspect = w / float(h + 1e-5)
                 area = w * h
-                
-                # Filtrado geométrico básico para descartar lo que no parece un panel
-                if self.min_aspect_ratio <= aspect <= self.max_aspect_ratio and \
-                   self.min_bbox_area <= area <= self.max_bbox_area and \
-                   w >= self.min_dimension and h >= self.min_dimension:
-                   
-                    # 6. Comprobar proporción de azul dentro de las intersecciones de Hough
-                    roi_hsv = hsv_image[y:y+h, x:x+w]
-                    blue_ratio = self._compute_blue_ratio_hsv(roi_hsv, self.hsv_lower_fog, self.hsv_upper_fog)
-                    
-                    if blue_ratio > 0.15:  # Umbral permisivo 
-                        score = min(1.0, blue_ratio + 0.3)
-                        
-                        # Expandir ligeramente la caja original
-                        pad_x, pad_y = int(w * 0.05), int(h * 0.05)
-                        x1 = max(0, x - pad_x)
-                        y1 = max(0, y - pad_y)
-                        x2 = min(w_img, x + w + pad_x)
-                        y2 = min(h_img, y + h + pad_y)
-                        
-                        candidates.append((x1, y1, x2, y2, float(score)))
-                        
-        # 7. Post-procesamiento estándar (Supresión de no máximos)
+
+                # 6. Filtrado geométrico básico
+                if not (self.min_aspect_ratio <= aspect <= self.max_aspect_ratio and
+                        self.min_bbox_area <= area <= self.max_bbox_area and
+                        w >= self.min_dimension and h >= self.min_dimension):
+                    continue
+
+                # 7. Filtro de proporción azul (permisivo, rango fog)
+                # 📎 Segmentación HSV con inRange:
+                #    https://docs.opencv.org/4.x/df/d9d/tutorial_py_colorspaces.html
+                roi_hsv = hsv_image[y:y+h, x:x+w]
+                blue_ratio = self._compute_blue_ratio_hsv(
+                    roi_hsv, self.hsv_lower_fog, self.hsv_upper_fog)
+                if blue_ratio < 0.15:
+                    continue
+
+                # 8. Expandir bbox
+                pad_x, pad_y = int(w * 0.05), int(h * 0.05)
+                x1 = max(0, x - pad_x)
+                y1 = max(0, y - pad_y)
+                x2 = min(w_img, x + w + pad_x)
+                y2 = min(h_img, y + h + pad_y)
+
+                roi_bgr = image[y1:y2, x1:x2]
+                if roi_bgr.size == 0:
+                    continue
+
+                # 9. Score F1 igual que DetectorBase (consistencia entre detectores)
+                # 📎 https://docs.opencv.org/4.x/d4/dc6/tutorial_py_template_matching.html
+                blue_mask = self._get_blue_mask(roi_bgr, self.hsv_lower_fog,
+                                                self.hsv_upper_fog)
+                score = self._compute_score(blue_mask)
+
+                if score < self.score_threshold_fog:
+                    continue
+
+                candidates.append((x1, y1, x2, y2, float(score)))
+
+        # 10. Post-procesamiento estándar
+        # 📎 NMS adaptado de PyImageSearch:
+        #    https://pyimagesearch.com/2015/02/16/faster-non-maximum-suppression-python/
         final = self._nms(candidates)
         return self._postprocess(final, h_img, w_img)

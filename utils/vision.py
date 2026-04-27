@@ -87,22 +87,51 @@ def cluster_by_proximity(detections):
 def suppress_contained(detections, containment_threshold):
     if len(detections) <= 1:
         return detections
+    # Volvemos a ordenar por SCORE de mayor a menor.
     detections = sorted(detections, key=lambda d: d[4], reverse=True)
     kept = []
     for det in detections:
         area_det = (det[2] - det[0]) * (det[3] - det[1])
         if area_det <= 0: continue
+        
         is_contained = False
-        for kd in kept:
+        replace_indices = []
+        
+        for i, kd in enumerate(kept):
             area_kd = (kd[2] - kd[0]) * (kd[3] - kd[1])
             xA, yA = max(det[0], kd[0]), max(det[1], kd[1])
             xB, yB = min(det[2], kd[2]), min(det[3], kd[3])
             inter = max(0, xB - xA) * max(0, yB - yA)
-            if (inter / area_det > containment_threshold) or (inter / area_kd > containment_threshold):
+            
+            # Si el candidato actual (menor score) está dentro de uno ya guardado (mayor score)
+            if inter / area_det > containment_threshold:
                 is_contained = True
                 break
-        if not is_contained:
+                
+            # Si uno que ya guardamos (mayor score) está contenido en el actual (menor score)
+            if inter / area_kd > containment_threshold:
+                # Evaluamos si el cuadro grande (actual) debería reemplazar a las partes pequeñas.
+                # Si la diferencia de score no es muy grande (< 0.10), asumimos que el actual
+                # es el cartel completo y el guardado era un trozo de texto.
+                if kd[4] - det[4] <= 0.12:
+                    replace_indices.append(i)
+                else:
+                    # Si el pequeño tenía MUCHO mejor score, el actual es probablemente
+                    # un "super-grupo" de ruido, así que lo descartamos.
+                    is_contained = True
+                    break
+        
+        if is_contained:
+            continue
+            
+        if replace_indices:
+            # Eliminamos los pequeños contenidos de mayor a menor índice para no alterar el array
+            for idx in sorted(replace_indices, reverse=True):
+                kept.pop(idx)
             kept.append(det)
+        else:
+            kept.append(det)
+            
     return kept
 
 # Estima presencia de niebla y niebla densa basada en saturación y densidad de bordes.

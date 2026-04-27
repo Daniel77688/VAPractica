@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 venv/
 env/
+visualizar_ediciones.py
+pasos_edicion/

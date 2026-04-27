@@ -271,7 +271,13 @@ class DetectorBase(Detector):
 
     # Postprocesa las detecciones
     def _postprocess(self, detections, h_img, w_img):
-        detections = cluster_by_proximity(detections)
+        # detections = cluster_by_proximity(detections)
+        """
+        SI quitamos cluster by proximity las detecciones son mejores y mas proximas a las del profesor, pero hay mas detecciones falsas, 
+        por otro lado si usamos el cluster by proximity son menos detecciones y menos cercanas pero pasan a aser detecciones mas robustas. 
+        El objetivo es encontrar el balance entre ambas cosas.
+
+        """
         detections = apply_nms(detections, self.nms_iou_threshold)
         detections = suppress_contained(detections, self.containment_threshold)
         

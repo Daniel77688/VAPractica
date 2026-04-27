@@ -57,11 +57,10 @@ def create_detector(detector_name: str) -> Detector:
     name = detector_name.upper()
     if name == 'BASE':
         return DetectorBase()
-    elif name == 'HOUGH':
+    if name == 'HOUGH':
         from detector import DetectorHough
         return DetectorHough()
-    else:
-        raise ValueError(f"Detector desconocido: '{detector_name}'. Opciones disponibles: BASE, HOUGH")
+    raise ValueError(f"Detector desconocido: '{detector_name}'. Opciones disponibles: BASE, HOUGH")
 
 
 def draw_detections(image: np.ndarray, detections: list) -> np.ndarray:
@@ -103,6 +102,9 @@ if __name__ == "__main__":
     parser.add_argument(
         '--test_path', default="",
         help='Select the testing data dir')
+    parser.add_argument(
+        '--min_score', type=float, default=0.0,
+        help='Confidence threshold to filter detections before saving (default: 0.0)')
 
     args = parser.parse_args()
 
@@ -133,6 +135,7 @@ if __name__ == "__main__":
     for idx, (fname, image) in enumerate(test_images):
         # Ejecutar detección
         detections = detector.detect(image)
+        detections = [d for d in detections if d[4] >= args.min_score]
 
         # Dibujar detecciones sobre la imagen
         result_img = draw_detections(image, detections)

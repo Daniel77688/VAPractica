@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from .mser_detector import DetectorBase
+from utils.vision import apply_nms
 
 # Clase detector alternativo basado en Transformada de Hough.
 class DetectorHough(DetectorBase):
@@ -92,5 +93,6 @@ class DetectorHough(DetectorBase):
 
                 candidates.append((x1, y1, x2, y2, float(score)))
 
-        return self._postprocess(candidates, h_img, w_img)
+        detections = apply_nms(candidates, self.nms_iou_threshold)
+        return self._postprocess(detections, h_img, w_img)
 

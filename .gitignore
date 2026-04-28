@@ -4,5 +4,5 @@ __pycache__/
 .venv/
 venv/
 env/
-visualizar_ediciones.py
-pasos_edicion/
+resultado_imgs/
+resultado.txt

@@ -39,105 +39,70 @@ def apply_nms(detections, iou_threshold):
                 suppressed[j] = True
     return kept
 
-# Determina si dos detecciones se tocan o solapan.
-def should_cluster_pair(d1, d2):
-    x1a, y1a, x2a, y2a = d1[:4]
-    x1b, y1b, x2b, y2b = d2[:4]
-    xA, yA = max(x1a, x1b), max(y1a, y1b)
-    xB, yB = min(x2a, x2b), min(y2a, y2b)
-    return (xB >= xA) and (yB >= yA)
-
-# Agrupa detecciones próximas y las fusiona en su rectángulo envolvente.
-def cluster_by_proximity(detections):
-    n = len(detections)
-    if n <= 1:
-        return detections
-    visited = [False] * n
-    clusters = []
-    for i in range(n):
-        if visited[i]:
-            continue
-        stack = [i]
-        visited[i] = True
-        comp = [i]
-        while stack:
-            u = stack.pop()
-            for v in range(n):
-                if not visited[v] and should_cluster_pair(detections[u], detections[v]):
-                    visited[v] = True
-                    stack.append(v)
-                    comp.append(v)
-        clusters.append(comp)
-
-    merged = []
-    for comp in clusters:
-        if len(comp) == 1:
-            merged.append(detections[comp[0]])
-            continue
-        boxes = [detections[idx] for idx in comp]
-        x1 = min(b[0] for b in boxes)
-        y1 = min(b[1] for b in boxes)
-        x2 = max(b[2] for b in boxes)
-        y2 = max(b[3] for b in boxes)
-        score = max(b[4] for b in boxes)
-        merged.append((x1, y1, x2, y2, score))
-    return merged
-
 # Suprime detecciones contenidas significativamente dentro de otras.
-def suppress_contained(detections, containment_threshold):
+def suppress_contained(detections, containment_threshold, score_replacement_diff=0.12):
+    """
+    Elimina detecciones redundantes cuando una está contenida significativamente dentro de otra.
+    
+    Estrategia: Si un cuadro grande y uno pequeño se solapan casi totalmente, 
+    preferimos el grande (el panel completo) a menos que el pequeño tenga una 
+    nota mucho más alta (indicando que el grande es probablemente ruido).
+    """
     if len(detections) <= 1:
         return detections
-    # Volvemos a ordenar por SCORE de mayor a menor.
+
+    # Ordenamos por score descendente (confianza)
     detections = sorted(detections, key=lambda d: d[4], reverse=True)
     kept = []
-    for det in detections:
-        area_det = (det[2] - det[0]) * (det[3] - det[1])
-        if area_det <= 0: continue
+
+    for current in detections:
+        x1, y1, x2, y2, score = current
+        area = (x2 - x1) * (y2 - y1)
+        if area <= 0: continue
         
-        is_contained = False
-        replace_indices = []
-        
-        for i, kd in enumerate(kept):
-            area_kd = (kd[2] - kd[0]) * (kd[3] - kd[1])
-            xA, yA = max(det[0], kd[0]), max(det[1], kd[1])
-            xB, yB = min(det[2], kd[2]), min(det[3], kd[3])
-            inter = max(0, xB - xA) * max(0, yB - yA)
+        is_redundant = False
+        to_replace = []
+
+        for i, other in enumerate(kept):
+            ox1, oy1, ox2, oy2, oscore = other
+            oarea = (ox2 - ox1) * (oy2 - oy1)
             
-            # Si el candidato actual (menor score) está dentro de uno ya guardado (mayor score)
-            if inter / area_det > containment_threshold:
-                is_contained = True
+            # Calcular intersección
+            inter = max(0, min(x2, ox2) - max(x1, ox1)) * max(0, min(y2, oy2) - max(y1, oy1))
+            if inter <= 0: continue
+
+            # Ratios de contención
+            contained_in_other = inter / area
+            other_contained_in_this = inter / oarea
+
+            # Caso A: La nueva detección está dentro de una que ya tenemos (y que tiene mejor nota)
+            if contained_in_other > containment_threshold:
+                is_redundant = True
                 break
-                
-            # Si uno que ya guardamos (mayor score) está contenido en el actual (menor score)
-            if inter / area_kd > containment_threshold:
-                # Evaluamos si el cuadro grande (actual) debería reemplazar a las partes pequeñas.
-                # Si la diferencia de score no es muy grande (< 0.10), asumimos que el actual
-                # es el cartel completo y el guardado era un trozo de texto.
-                if kd[4] - det[4] <= 0.12:
-                    replace_indices.append(i)
+            
+            # Caso B: La nueva detección "envuelve" a una que ya teníamos
+            if other_contained_in_this > containment_threshold:
+                # Si la diferencia de nota es pequeña, asumimos que el nuevo 
+                # (grande) es el cartel completo y el viejo (pequeño) era un detalle/texto.
+                if oscore - score < score_replacement_diff:
+                    to_replace.append(i)
                 else:
-                    # Si el pequeño tenía MUCHO mejor score, el actual es probablemente
-                    # un "super-grupo" de ruido, así que lo descartamos.
-                    is_contained = True
+                    # Si el pequeño tenía mucha mejor nota, el grande es probablemente ruido.
+                    is_redundant = True
                     break
         
-        if is_contained:
-            continue
-            
-        if replace_indices:
-            # Eliminamos los pequeños contenidos de mayor a menor índice para no alterar el array
-            for idx in sorted(replace_indices, reverse=True):
+        if not is_redundant:
+            # Eliminar los trozos pequeños que han sido "absorbidos" por el nuevo cuadro grande
+            for idx in sorted(to_replace, reverse=True):
                 kept.pop(idx)
-            kept.append(det)
-        else:
-            kept.append(det)
-            
+            kept.append(current)
+
     return kept
 
-# Estima presencia de niebla y niebla densa basada en saturación y densidad de bordes.
-def estimate_fog_conditions(hsv_image, gray_eq, fog_sat_thr, fog_edge_thr, dense_sat_thr):
+# Estima presencia de niebla basada en saturación y densidad de bordes.
+def estimate_fog_conditions(hsv_image, gray_eq, fog_sat_thr, fog_edge_thr):
     """
-    Estima presencia de niebla y niebla densa basada en saturación y densidad de bordes.
+    Estima presencia de niebla basada en saturación y densidad de bordes.
     
     Motivo: La niebla reduce drásticamente la saturación del color (los colores se ven grises/blancos)
     y difumina los contornos, reduciendo la densidad de bordes finos. Usamos Canny para medir 
@@ -145,14 +110,13 @@ def estimate_fog_conditions(hsv_image, gray_eq, fog_sat_thr, fog_edge_thr, dense
     
     Referencia:
     - Detección de bordes Canny: https://docs.opencv.org/4.x/da/d22/tutorial_py_canny.html
-    - Efectos de la niebla en la imagen: https://en.wikipedia.org/wiki/Visibility_(geometry)
+    - Efectos de la niebla en la imagen: https://en.wikipedia.org/wiki/Visibility
     """
     sat_mean = float(hsv_image[:, :, 1].mean())
     edges = cv2.Canny(gray_eq, 80, 160)
     edge_ratio = float(np.count_nonzero(edges) / edges.size)
     is_fog = sat_mean < fog_sat_thr and edge_ratio < fog_edge_thr
-    is_dense = sat_mean < dense_sat_thr and edge_ratio < fog_edge_thr
-    return is_fog, is_dense
+    return is_fog
 
 # Aplica CLAHE en espacio LAB para mejorar contraste local.
 def enhance_image_clahe(image):
@@ -161,12 +125,8 @@ def enhance_image_clahe(image):
     
     Motivo: A diferencia de la ecualización de histograma normal que actúa sobre toda la imagen, 
     CLAHE opera en pequeños bloques mejorando el contraste local sin amplificar en exceso 
-    el ruido. Esto es vital para revelar paneles ocultos por niebla o mala iluminación.
+    el ruido. Esto es vital para revelar paneles ocultos por mala iluminación.
     El espacio LAB se usa porque separa completamente la luminosidad (L) del color (A, B).
-    
-    Referencia: 
-    - OpenCV CLAHE: https://docs.opencv.org/4.x/d5/daf/tutorial_py_histogram_equalization.html
-    - Espacio de color LAB: https://en.wikipedia.org/wiki/CIELAB_color_space
     """
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
@@ -174,8 +134,9 @@ def enhance_image_clahe(image):
     lab_enh = cv2.merge([clahe.apply(l_ch), a_ch, b_ch])
     enh_bgr = cv2.cvtColor(lab_enh, cv2.COLOR_LAB2BGR)
     enh_hsv = cv2.cvtColor(enh_bgr, cv2.COLOR_BGR2HSV)
-    enh_gray_eq = cv2.equalizeHist(cv2.cvtColor(enh_bgr, cv2.COLOR_BGR2GRAY))
+    enh_gray_eq = cv2.cvtColor(enh_bgr, cv2.COLOR_BGR2GRAY)
     return enh_bgr, enh_hsv, enh_gray_eq
+
 
 # Genera la máscara ideal para el score de correlación.
 def build_ideal_mask(h, w, padding_ratio=0.08):
@@ -183,9 +144,8 @@ def build_ideal_mask(h, w, padding_ratio=0.08):
     Genera la máscara ideal para el cálculo del score F1 de correlación.
     
     Motivo: Para verificar si un candidato es realmente un cartel rectangular, lo comparamos
-    con una "plantilla ideal" (una matriz con 1s en el centro y 0s en un pequeño margen).
-    Luego se calcula el F1-Score (balance entre Precision y Recall) de la máscara detectada 
-    contra esta plantilla.
+    con una "plantilla ideal" (una matriz con 1s en el centro y 0s en un margen). Luego se calcula 
+    el F1-Score (balance entre Precision y Recall) de la máscara detectada contra esta plantilla.
     
     Referencia:
     - F1-Score: https://en.wikipedia.org/wiki/F-score

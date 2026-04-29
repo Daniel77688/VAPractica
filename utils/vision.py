@@ -1,43 +1,26 @@
 import cv2
 import numpy as np
 
-# Calcula el Intersection over Union (IoU) entre dos bounding boxes.
-def compute_iou(boxA, boxB):
-    xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
-    xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
-    inter = max(0, xB - xA) * max(0, yB - yA)
-    area_a = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    area_b = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    return inter / (area_a + area_b - inter + 1e-6)
-
-# Aplica Non-Maximum Suppression a una lista de detecciones.
-# detections: lista de (x1, y1, x2, y2, score)
 def apply_nms(detections, iou_threshold):
     """
     Aplica Non-Maximum Suppression (NMS) para eliminar detecciones redundantes.
-    
-    Motivo: Los algoritmos de visión suelen encontrar múltiples cuadros superpuestos 
-    para un mismo objeto. NMS soluciona esto conservando solo el cuadro con mayor 
-    puntuación (score) y eliminando aquellos vecinos que tengan un alto solapamiento 
+
+    Motivo: Los algoritmos de visión suelen encontrar múltiples cuadros superpuestos
+    para un mismo objeto. NMS soluciona esto conservando solo el cuadro con mayor
+    puntuación (score) y eliminando aquellos vecinos que tengan un alto solapamiento
     (Intersection over Union - IoU) con él.
-    
-    Referencia: 
+
+    Referencia:
     - Explicación de NMS: https://pyimagesearch.com/2014/11/17/non-maximum-suppression-object-detection-python/
     - Concepto de IoU: https://pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/
+    - OpenCV NMSBoxes: https://docs.opencv.org/4.x/d6/d0f/group__dnn.html#ga9d118d70a1659af729d01b10233213ee
     """
     if not detections:
         return []
-    detections = sorted(detections, key=lambda d: d[4], reverse=True)
-    kept = []
-    suppressed = [False] * len(detections)
-    for i, det in enumerate(detections):
-        if suppressed[i]:
-            continue
-        kept.append(det)
-        for j in range(i + 1, len(detections)):
-            if not suppressed[j] and compute_iou(det[:4], detections[j][:4]) > iou_threshold:
-                suppressed[j] = True
-    return kept
+    boxes  = [[x1, y1, x2-x1, y2-y1] for x1,y1,x2,y2,_ in detections]
+    scores = [float(s) for *_,s in detections]
+    indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
+    return [detections[i] for i in indices.flatten()]
 
 # Suprime detecciones contenidas significativamente dentro de otras.
 def suppress_contained(detections, containment_threshold, score_replacement_diff=0.12):
